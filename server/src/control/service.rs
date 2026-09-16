@@ -282,11 +282,14 @@ impl ControlService {
         self.plugin_runtime.cancel_initialization()
     }
 
+    // 禁用广告：直接返回空列表，不请求远端广告服务。
+    #[allow(unreachable_code, unused_variables)]
     pub(super) async fn ads(
         &self,
         disabled_ad_ids: Option<&str>,
         language: &str,
     ) -> Result<AdRuntime> {
+        return Ok(AdRuntime { slots: Vec::new() });
         let client = self.clients.default_client().await?;
         let installation_id = self.store.installation_id().await?;
         let mut request = client
