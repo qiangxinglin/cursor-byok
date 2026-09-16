@@ -1,0 +1,109 @@
+name: Sync upstream
+
+# Fork-only workflow: rebase local patch commits onto upstream/main,
+# push the rebased main, and tag the desktop version to trigger the
+# upstream release workflow (unchanged .github/workflows/release.yml).
+# Requires the RELEASE_TOKEN secret (fine-grained PAT of the fork owner
+# with Contents and Issues write access): pushes made with the default
+# GITHUB_TOKEN never trigger other workflows, and the release workflow
+# rejects actors other than the repository owner.
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: https://github.com/leookun/cursor-byok.git
+  FORK_REPO: qiangxinglin/cursor-byok
+
+jobs:
+  sync:
+    name: Rebase patches onto upstream and release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out fork main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Configure git identity
+        run: |
+          git config user.name "qiangxinglin"
+          git config user.email "qiangxinglin@users.noreply.github.com"
+
+      - name: Fetch upstream main
+        run: |
+          git remote add upstream "$UPSTREAM_REPO"
+          git fetch upstream main --no-tags
+
+      - name: Rebase patches onto upstream/main
+        id: rebase
+        run: |
+          before=$(git rev-parse HEAD)
+          git rebase upstream/main
+          after=$(git rev-parse HEAD)
+          if [ "$before" = "$after" ]; then
+            echo "moved=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "moved=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open issue on rebase conflict
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          body=$(cat <<'EOF'
+          The scheduled upstream sync could not rebase the fork patches onto
+          upstream/main. Please resolve the conflict locally:
+
+          1. git fetch upstream main
+          2. git rebase upstream/main
+          3. resolve conflicts in the patch commits
+          4. git push origin main --force-with-lease
+
+          Automatic sync resumes on the next scheduled run.
+          EOF
+          )
+          gh issue create \
+            --title "Upstream sync needs manual rebase" \
+            --body "$body" \
+            --label sync
+
+      - name: Push rebased main
+        if: steps.rebase.outcome == 'success' && steps.rebase.outputs.moved == 'true'
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          git push "https://x-access-token:${RELEASE_TOKEN}@github.com/${FORK_REPO}.git" main --force-with-lease
+
+      - name: Read desktop version
+        if: steps.rebase.outcome == 'success'
+        id: version
+        run: |
+          version=$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Tag release when the version is unpublished
+        if: steps.rebase.outcome == 'success'
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if git ls-remote --tags "https://x-access-token:${RELEASE_TOKEN}@github.com/${FORK_REPO}.git" "v${VERSION}" | grep -q .; then
+            echo "v${VERSION} is already tagged; nothing to release"
+            exit 0
+          fi
+          git tag "v${VERSION}"
+          git push "https://x-access-token:${RELEASE_TOKEN}@github.com/${FORK_REPO}.git" "v${VERSION}"
+          echo "Tagged v${VERSION}; the release workflow should now be running"
